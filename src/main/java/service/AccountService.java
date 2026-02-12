@@ -4,6 +4,7 @@ import db.DatabaseUtility;
 import java.sql.*;
 import java.math.BigDecimal;
 import logs.*;
+import model.Account;
 
 
 
@@ -20,7 +21,8 @@ public class AccountService {
 	        System.out.println("Invalid name! Use letters, spaces, dots, hyphens only.");
 	        return;
 	    }
-
+	    
+	    // Prevent negative balance
 	    if (initialBalance.compareTo(BigDecimal.ZERO) < 0) {
 	        System.out.println("Initial balance cannot be negative.");
 	        return;
@@ -36,8 +38,7 @@ public class AccountService {
 			
 			ps.executeUpdate();
 			
-			// Get generated keys
-			
+			// Retrieve auto-generated account number
 			ResultSet rs = ps.getGeneratedKeys();
 			
 			if(rs.next()) {
@@ -54,6 +55,29 @@ public class AccountService {
 		
 		
 	}
+	
+	
+	//FETCH ACCOUNT
+	private Account getAccount(Connection con, int accountNumber) throws SQLException {
+
+        String accQuery = "SELECT * FROM accounts WHERE account_number=?";
+        
+        try(PreparedStatement ps = con.prepareStatement(accQuery)){
+
+	        ps.setInt(1, accountNumber);
+	
+	        ResultSet rs = ps.executeQuery();
+	
+	        if (rs.next()) {
+	            return new Account(
+	                rs.getInt("account_number"),
+	                rs.getString("account_holder_name"),
+	                rs.getBigDecimal("balance"));
+	        }
+        }
+
+        return null;
+    }
 	
 	
     // DEPOSIT
@@ -81,33 +105,22 @@ public class AccountService {
 			con = DatabaseUtility.getConnection();
 			con.setAutoCommit(false);
 			
-			String updateQuery = "UPDATE accounts SET balance = balance + ? WHERE account_number = ?";
-
+			Account acc = getAccount(con, accountNumber);
 			
-			
-			//update balance
-			
-			PreparedStatement updatePS = con.prepareStatement(updateQuery);
-			
-			updatePS.setBigDecimal(1, amount);
-			updatePS.setInt(2, accountNumber);
-			
-			
-			int rows = updatePS.executeUpdate();
-			
-			
-			if (rows == 0) {
+			if (acc == null) {
 				System.out.println("Account not found");
 				con.rollback();
 				return;
 			}
 			
+			BigDecimal newBalance = acc.getBalance().add(amount);
 			
-			BigDecimal newBal = fetchBalance(con, accountNumber);
-			logTransaction(con, accountNumber, "DEPOSIT", amount, newBal);
+			updateBalance(con, accountNumber, newBalance);
+			
+			logTransaction(con, accountNumber, "DEPOSIT", amount, newBalance);
 			con.commit();
 			
-			System.out.println("Deposit successful. Balance: " + newBal);
+			System.out.println("Deposit successful. Balance: " + newBalance);
 			
 						
 		} catch (Exception e) {
@@ -122,7 +135,7 @@ public class AccountService {
 		
 		
 		if(amount.compareTo(BigDecimal.ZERO) <= 0) {
-			System.out.println("WithDrawn amount must be greater than 0");
+			System.out.println("Withdrawal amount must be greater than 0");
 			return;
 		}
 		
@@ -136,36 +149,28 @@ public class AccountService {
 			
 			
 			
-			BigDecimal currentBal = fetchBalance(con, accountNumber);
+			Account acc = getAccount(con, accountNumber);
 			
-			if (currentBal == null) {
+			
+			//account number validation
+			if (acc == null) {
                 System.out.println("Account not found");
                 con.rollback();
                 return;
             }
 			
-			if (currentBal.compareTo(amount) < 0) {
+			//amount validation
+			if (acc.getBalance().compareTo(amount) < 0) {
                 System.out.println("Insufficient balance");
                 con.rollback();
                 return;
             }
-			
-			
-			
-			String updateQuery = "UPDATE accounts SET balance = balance - ? WHERE account_number = ?";
-			
 						
-			PreparedStatement updatePS = con.prepareStatement(updateQuery);
-			updatePS.setBigDecimal(1, amount);
-			updatePS.setInt(2, accountNumber);
 			
-			updatePS.executeUpdate();
+			BigDecimal newBalance = acc.getBalance().subtract(amount);
 			
-			
-			
-						
-			BigDecimal newBalance = currentBal.subtract(amount);
-			
+			updateBalance(con, accountNumber, newBalance);
+
 			logTransaction(con, accountNumber, "WITHDRAWAL", amount, newBalance);
 			con.commit();
 			
@@ -179,48 +184,50 @@ public class AccountService {
 
 	}
 	
+	
+	
     // VIEW BALANCE
 	public void getBalance(int accountNumber) {
-				
-		try {
-			
-			Connection con = DatabaseUtility.getConnection();
-			
-			
-			BigDecimal balance = fetchBalance(con, accountNumber);
-									
-			if(balance == null) {	
-				System.out.println("Account not found");
-			} else {
-				System.out.println("Current Balance : "+ balance);		
-			}
-			
-		} catch (Exception e) {
-			e.printStackTrace();
-		}
+
+	    try (Connection con = DatabaseUtility.getConnection()) {
+
+	        Account acc = getAccount(con, accountNumber);
+
+	        if (acc == null) {
+	            System.out.println("Account not found");
+	            return;
+	        }
+
+	        System.out.println("Account Holder Name: " + acc.getName() + " | Balance: " + acc.getBalance());
+
+	    } catch (Exception e) {
+	        e.printStackTrace();
+	    }
 	}
+
 	
     // HELPER METHODS (REUSABLE)
 	
-	private BigDecimal fetchBalance(Connection con, int accountNumber) throws SQLException {
-		
-		String fetchQuery = "SELECT balance FROM accounts WHERE account_number = ?";
-		PreparedStatement fetchPS = con.prepareStatement(fetchQuery);
-		
-		fetchPS.setInt(1, accountNumber);
-		ResultSet rs = fetchPS.executeQuery();
-		
-		return rs.next() ? rs.getBigDecimal("balance") : null;
+	private void updateBalance(Connection con,int accountNumber, BigDecimal balance) throws SQLException {
 
-	}
+        String updateQuery = "UPDATE accounts SET balance = ? WHERE account_number = ?";
+        
+        try(PreparedStatement ps = con.prepareStatement(updateQuery)){
+
+	        ps.setBigDecimal(1, balance);
+	        ps.setInt(2, accountNumber);
+	        ps.executeUpdate();
+        }
+    }
+
 	
 	
 	// Log transaction (DB + File)
-	private void logTransaction(Connection con, int accountNumber, String Type, 
+	private void logTransaction(Connection con, int accountNumber, String type, 
 								BigDecimal amount, BigDecimal balance) throws SQLException {
 		
-		TransactionLogger.log(con, accountNumber, Type, amount, balance);
-		FileLogger.logToFile(accountNumber, Type, amount, balance);
+		TransactionLogger.log(con, accountNumber, type, amount, balance);
+		FileLogger.logToFile(accountNumber, type, amount, balance);
 		
 	}
 	
@@ -233,8 +240,6 @@ public class AccountService {
 			e.printStackTrace();
 		}
 	}
-	
-	
 	
 	
 }
